@@ -1,1 +1,8 @@
 streamlit
+pandas
+plotly
+google-genai
+supabase
+openpyxl
+xlrd
+python-dotenv
