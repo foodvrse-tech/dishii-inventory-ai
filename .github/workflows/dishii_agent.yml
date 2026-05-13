@@ -1,10 +1,9 @@
-name: Dishii AI Agent - Daily Automation
+name: Dishii AI Agent
 
 on:
   schedule:
-    # Runs every day at 6:00 PM EAT (15:00 UTC)
     - cron: '0 15 * * *'
-  workflow_dispatch:  # Allows manual trigger from GitHub
+  workflow_dispatch:
 
 jobs:
   run-agent:
@@ -21,15 +20,11 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install supabase pandas python-dotenv google-generativeai
+        pip install supabase pandas python-dotenv
     
     - name: Run Dishii AI Agent
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
-        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
       run: |
         python agent_automation.py
