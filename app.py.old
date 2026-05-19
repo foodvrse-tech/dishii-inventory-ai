@@ -1,0 +1,975 @@
+"""
+Dishii v5.1 - Complete Production Platform
+Fixed: All bugs, deduplication, mixed inventory thresholds, WAHA session config
+"""
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+from datetime import datetime, date, timedelta
+from google import genai
+from supabase import create_client
+import os
+from dotenv import load_dotenv
+import io
+import base64
+import re
+import hashlib
+import json
+import logging
+import requests
+import uuid
+from typing import Dict, Tuple, Optional, List, Any
+import warnings
+warnings.filterwarnings('ignore')
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+# ============================================
+# CONFIGURATION & VALIDATION
+# ============================================
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+N8N_WEBHOOK = os.getenv("N8N_WEBHOOK", "")
+# NEW - correct
+EVOLUTION_URL = os.getenv("EVOLUTION_URL", "https://evolution-api-production-498eb.up.railway.app")
+EVOLUTION_KEY = os.getenv("EVOLUTION_KEY", "dishii_demo_2025")
+EVOLUTION_INSTANCE = os.getenv("EVOLUTION_INSTANCE", "dishii")
+MANAGER_PHONE = os.getenv("MANAGER_PHONE", "")
+
+# Validate critical config
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("❌ Missing Supabase credentials. Check your .env file.")
+    st.stop()
+
+try:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+except Exception as e:
+    st.error(f"❌ Failed to initialize clients: {e}")
+    st.stop()
+
+# Check WAHA status
+WAHA_AVAILABLE = False
+if WAHA_URL and WAHA_API_KEY:
+    try:
+        test_response = requests.get(f"{WAHA_URL}/api/health", timeout=5)
+        WAHA_AVAILABLE = test_response.status_code == 200
+        if WAHA_AVAILABLE:
+            # Test session exists
+            session_check = requests.get(f"{WAHA_URL}/api/sessions", timeout=5)
+            if session_check.status_code == 200:
+                sessions = session_check.json()
+                if WAHA_SESSION not in sessions:
+                    st.warning(f"⚠️ WAHA session '{WAHA_SESSION}' not found. Please start it in the WAHA dashboard.")
+                    WAHA_AVAILABLE = False
+    except:
+        WAHA_AVAILABLE = False
+
+# ============================================
+# PAGE CONFIGURATION
+# ============================================
+st.set_page_config(
+    page_title="Dishii | Food Operations Intelligence Platform",
+    page_icon="🍔",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ============================================
+# LOAD CUSTOM LOGO
+# ============================================
+def get_base64_image(image_path: str) -> Optional[str]:
+    try:
+        with open(image_path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode()
+    except:
+        return None
+
+logo_base64 = get_base64_image("assets/dishii-logo.png")
+
+# ============================================
+# CUSTOM CSS - PREMIUM
+# ============================================
+st.markdown("""
+<style>
+    .main .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; max-width: 1400px; }
+    [data-testid="stSidebar"] { background: #0f172a; border-right: 1px solid #334155; min-width: 280px; }
+    #MainMenu {visibility: visible !important;}
+    footer {visibility: hidden;}
+    header {visibility: visible !important;}
+    
+    .hero-section { background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 1.5rem 2rem; border-radius: 20px; margin-bottom: 1.5rem; border: 1px solid #334155; }
+    .hero-title { font-size: 1.75rem; font-weight: 700; background: linear-gradient(135deg, #10b981 0%, #34d399 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .hero-subtitle { font-size: 0.9rem; color: #94a3b8; }
+    
+    .metric-card { padding: 1rem 1.25rem; border-radius: 16px; background: #1e293b; border: 1px solid #334155; transition: all 0.2s ease; text-align: center; }
+    .metric-card:hover { transform: translateY(-2px); border-color: #10b981; }
+    .metric-title { font-size: 0.75rem; font-weight: 500; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.5px; }
+    .metric-value { font-size: 1.75rem; font-weight: 700; color: #f1f5f9; margin: 0.25rem 0; }
+    .metric-subtitle { font-size: 0.7rem; color: #64748b; }
+    
+    .action-card { background: #1e293b; border-radius: 14px; padding: 0.875rem 1rem; margin-bottom: 0.75rem; border-left: 4px solid; transition: all 0.2s ease; }
+    .action-card:hover { transform: translateX(4px); background: #2d3748; }
+    .action-title { font-size: 0.95rem; font-weight: 600; color: #f1f5f9; margin-bottom: 0.25rem; }
+    .action-reason { font-size: 0.7rem; color: #94a3b8; margin-bottom: 0.5rem; }
+    .action-supplier { font-size: 0.7rem; color: #64748b; }
+    
+    .stTabs [data-baseweb="tab-list"] { gap: 0.5rem; background: #1e293b; padding: 0.5rem; border-radius: 12px; margin-bottom: 1rem; }
+    .stTabs [data-baseweb="tab"] { border-radius: 8px; padding: 0.5rem 1rem; font-weight: 500; white-space: nowrap; }
+    .stTabs [aria-selected="true"] { background: #10b981; color: white; }
+    
+    .stProgress > div > div { background-color: #10b981; }
+    .stDataFrame { border-radius: 12px; overflow: auto; }
+    .stButton button { border-radius: 8px; font-weight: 500; }
+    div[data-testid="stMetricValue"] { font-size: 1.5rem; font-weight: 700; }
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================
+# SESSION STATE
+# ============================================
+if "processed_upload_hash" not in st.session_state:
+    st.session_state.processed_upload_hash = None
+if "alerts_sent_for_hash" not in st.session_state:
+    st.session_state.alerts_sent_for_hash = None
+if "current_df" not in st.session_state:
+    st.session_state.current_df = None
+if "current_summary" not in st.session_state:
+    st.session_state.current_summary = None
+if "current_business_id" not in st.session_state:
+    st.session_state.current_business_id = None
+if "upload_count" not in st.session_state:
+    st.session_state.upload_count = 0
+
+# ============================================
+# SIDEBAR
+# ============================================
+with st.sidebar:
+    if logo_base64:
+        st.markdown(f'<div style="text-align: center;"><img src="data:image/png;base64,{logo_base64}" width="50" style="border-radius: 12px;"></div>', unsafe_allow_html=True)
+    
+    st.markdown("### ⚙️ Controls")
+    
+    with st.expander("📊 Display Settings", expanded=False):
+        items_per_page = st.slider("Items per page", 10, 100, 20, 5)
+        show_top_products = st.slider("Priority items to show", 5, 50, 15, 5)
+    
+    with st.expander("🎯 Alert Thresholds", expanded=False):
+        red_threshold = st.number_input("🔴 Red Alert (days)", 1, 365, 60, help="Days before expiry to trigger RED alert")
+        amber_threshold = st.number_input("🟠 Amber Alert (days)", 1, 365, 120, help="Days before expiry to trigger AMBER alert")
+        stock_warning_days = st.number_input("📦 Stock Warning (days)", 1, 60, 14, help="Days of stock left to trigger reorder alert")
+    
+    st.divider()
+    
+    st.markdown("### 🏪 Business Info")
+    business_name = st.text_input("Business Name", placeholder="e.g. 99 Mart Westlands")
+    manager_phone = st.text_input("📱 Manager WhatsApp", placeholder="+2547XXXXXXXX", help="For order alerts (include country code)")
+    
+    st.divider()
+    st.markdown("### 📤 Upload")
+    uploaded_file = st.file_uploader("Excel or CSV", type=["xlsx", "csv", "xls"])
+    
+    st.divider()
+    st.markdown("### 🔌 System Status")
+    try:
+        test = supabase.table("inventory_uploads").select("count", count="exact").execute()
+        st.success(f"✅ Database Connected ({test.count} uploads)")
+    except Exception as e:
+        st.error(f"❌ Database Error")
+    
+    if WAHA_AVAILABLE:
+        st.success(f"✅ WhatsApp Ready (WAHA - session: {WAHA_SESSION})")
+    elif WAHA_URL:
+        st.warning("⚠️ WAHA configured but not responding. Check if session is started.")
+    else:
+        st.info("💬 WhatsApp: Add WAHA_URL and WAHA_API_KEY to .env")
+
+# ============================================
+# WHATSAPP FUNCTIONS (WAHA + n8n Fallback)
+# ============================================
+
+def send_whatsapp_via_waha(to_number: str, message: str) -> bool:
+    """Send WhatsApp message via WAHA (FREE)"""
+    if not WAHA_URL or not WAHA_API_KEY or not WAHA_AVAILABLE:
+        return False
+    
+    try:
+        to_number = to_number.replace('+', '').replace(' ', '')
+        url = f"{WAHA_URL}/api/sendText"
+        
+        payload = {
+            "session": WAHA_SESSION,
+            "chatId": f"{to_number}@c.us",
+            "text": message
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "X-Api-Key": WAHA_API_KEY
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        return response.status_code in [200, 201]
+    except Exception as e:
+        logger.error(f"WAHA error: {e}")
+        return False
+
+def send_whatsapp_via_n8n(product: str, quantity: int, supplier: str, manager_phone: str, business_name: str, current_stock: float, days_left: int, decision_id: str) -> bool:
+    """Send WhatsApp via n8n webhook (fallback)"""
+    if not N8N_WEBHOOK:
+        return False
+    
+    try:
+        payload = {
+            "product": product,
+            "suggested_qty": quantity,
+            "supplier": supplier,
+            "manager_phone": manager_phone,
+            "business_name": business_name,
+            "current_stock": current_stock,
+            "days_left": days_left,
+            "decision_id": decision_id
+        }
+        response = requests.post(N8N_WEBHOOK, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        logger.error(f"n8n error: {e}")
+        return False
+
+def send_whatsapp_alert(product_name: str, suggested_qty: int, supplier: str, 
+                        manager_phone: str, business_name: str, current_stock: float, 
+                        stock_days: float, risk_level: str, decision_id: str) -> bool:
+    """Send WhatsApp alert using available method (WAHA first, then n8n)"""
+    message = f"""🚨 *DISHII ALERT* 🚨
+
+*Business:* {business_name}
+*Product:* {product_name}
+*Risk Level:* {risk_level}
+*Current Stock:* {current_stock:.0f} units
+*Days Left:* {int(stock_days)} days
+
+*Suggested Order:* {suggested_qty} units
+*Supplier:* {supplier}
+
+*Reply:* YES to approve, NO to decline
+
+_Dishii AI - Automated Order Management_
+ID: {decision_id[:8]}"""
+    
+    # Try WAHA first (free)
+    if WAHA_AVAILABLE:
+        return send_whatsapp_via_waha(manager_phone, message)
+    
+    # Fallback to n8n
+    return send_whatsapp_via_n8n(product_name, suggested_qty, supplier, manager_phone, business_name, current_stock, int(stock_days), decision_id)
+
+def send_whatsapp_alerts(df: pd.DataFrame, manager_phone: str, business_name: str, file_hash: str = None) -> int:
+    """Send WhatsApp alerts for all products needing orders with deduplication"""
+    if not manager_phone:
+        return 0
+    
+    # Check if already processed (deduplication)
+    if file_hash and is_upload_processed(file_hash):
+        return 0
+    
+    alerts_sent = 0
+    orders_df = df[df["order_required"] == True]
+    
+    for _, row in orders_df.head(5).iterrows():
+        suggested_qty = int(row['daily_sales_rate'] * 14)
+        decision_id = str(uuid.uuid4())
+        
+        # Log decision to database
+        try:
+            supabase.table("decisions").insert({
+                "id": decision_id,
+                "decision_type": "reorder",
+                "product_name": row['product_name'],
+                "suggested_quantity": suggested_qty,
+                "suggested_supplier": row.get('supplier', 'Unknown'),
+                "status": "pending",
+                "created_at": datetime.now().isoformat()
+            }).execute()
+        except:
+            pass
+        
+        success = send_whatsapp_alert(
+            product_name=row['product_name'],
+            suggested_qty=suggested_qty,
+            supplier=row.get('supplier', 'Unknown'),
+            manager_phone=manager_phone,
+            business_name=business_name,
+            current_stock=row['current_stock'],
+            stock_days=row['stock_days'],
+            risk_level=row.get('risk_level', 'MEDIUM'),
+            decision_id=decision_id
+        )
+        if success:
+            alerts_sent += 1
+    
+    # Mark as processed to prevent duplicate alerts
+    if file_hash and alerts_sent > 0:
+        mark_upload_processed(file_hash, None)
+    
+    return alerts_sent
+
+# ============================================
+# BUSINESS FUNCTIONS
+# ============================================
+def get_or_create_business(business_name: str, whatsapp_number: str = None) -> Tuple[str, bool]:
+    if not business_name or business_name.strip() == "":
+        business_name = "Unknown Business"
+    
+    slug = re.sub(r'[^a-z0-9]+', '-', business_name.lower().strip()).strip('-')
+    
+    try:
+        existing = supabase.table("businesses").select("*").eq("business_slug", slug).execute()
+        
+        if existing.data:
+            business = existing.data[0]
+            supabase.table("businesses").update({
+                "last_active_at": datetime.now().isoformat(),
+                "total_uploads": business.get("total_uploads", 0) + 1
+            }).eq("id", business["id"]).execute()
+            return business["id"], False
+        
+        new_business = supabase.table("businesses").insert({
+            "business_name": business_name.strip(),
+            "business_slug": slug,
+            "whatsapp_number": whatsapp_number,
+            "total_uploads": 1,
+            "first_seen_at": datetime.now().isoformat(),
+            "last_active_at": datetime.now().isoformat()
+        }).execute()
+        return new_business.data[0]["id"], True
+    except Exception as e:
+        logger.error(f"Business operation failed: {e}")
+        raise
+
+# ============================================
+# CATEGORY DETECTION
+# ============================================
+PRODUCE_KEYWORDS = {"tomato", "onion", "spinach", "cabbage", "carrot", "banana", "apple", "avocado", "mango", "pineapple", "watermelon", "ginger", "garlic", "lettuce"}
+MEAT_KEYWORDS = {"beef", "chicken", "sausage", "minced", "meat", "pork", "lamb", "goat"}
+DAIRY_KEYWORDS = {"milk", "yogurt", "cheese", "butter", "cream", "ghee"}
+
+def detect_category(product_name: str) -> str:
+    if not product_name:
+        return "dry_goods"
+    name_lower = product_name.lower()
+    if any(kw in name_lower for kw in PRODUCE_KEYWORDS):
+        return "fresh_produce"
+    if any(kw in name_lower for kw in MEAT_KEYWORDS):
+        return "fresh_meat"
+    if any(kw in name_lower for kw in DAIRY_KEYWORDS):
+        return "dairy"
+    return "dry_goods"
+
+# ============================================
+# CONSTANTS & THRESHOLDS
+# ============================================
+SHELF_LIFE = {"fresh_produce": 7, "fresh_meat": 4, "dairy": 14, "dry_goods": 365}
+
+def get_thresholds(category: str) -> dict:
+    """Get category-specific thresholds"""
+    thresholds = {
+        "fresh_produce": {"red": 3, "amber": 5},
+        "fresh_meat": {"red": 2, "amber": 3},
+        "dairy": {"red": 5, "amber": 10},
+        "dry_goods": {"red": red_threshold, "amber": amber_threshold}
+    }
+    return thresholds.get(category, thresholds["dry_goods"])
+
+def correct_expiry_date(expiry_date, category: str):
+    if pd.isna(expiry_date):
+        return None
+    today = datetime.now().date()
+    if isinstance(expiry_date, str):
+        expiry_date = pd.to_datetime(expiry_date).date()
+    days = (expiry_date - today).days
+    max_life = SHELF_LIFE.get(category, 365)
+    if days > max_life:
+        return today + timedelta(days=max_life)
+    return expiry_date
+
+def days_to_expiry(expiry_date):
+    if pd.isna(expiry_date):
+        return None
+    try:
+        if isinstance(expiry_date, str):
+            expiry_date = pd.to_datetime(expiry_date)
+        today = datetime.now().date()
+        if hasattr(expiry_date, 'date'):
+            expiry = expiry_date.date()
+        else:
+            expiry = expiry_date
+        return (expiry - today).days
+    except:
+        return None
+
+# ============================================
+# DATA NORMALIZATION
+# ============================================
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_")
+    
+    mappings = {
+        "product_name": ["product_name", "product", "item", "name", "item_name", "description", "sku_name"],
+        "expiry_date": ["expiry_date", "expiry", "best_before", "expiration_date", "exp_date", "use_by"],
+        "current_stock": ["current_stock", "stock", "quantity", "qty", "inventory", "units", "on_hand"],
+        "daily_sales_rate": ["daily_sales_rate", "daily_sales", "sales_rate", "velocity", "avg_sales"],
+        "supplier": ["supplier", "vendor", "supplier_name", "vendor_name"],
+        "selling_price": ["selling_price", "price", "retail_price", "sale_price", "unit_price"],
+        "supplier_phone": ["supplier_phone", "phone", "contact", "supplier_contact"],
+        "supplier_email": ["supplier_email", "email", "supplier_email_address"]
+    }
+    
+    for target, options in mappings.items():
+        if target not in df.columns:
+            for col in options:
+                if col in df.columns:
+                    df[target] = df[col]
+                    break
+    
+    if "product_name" not in df.columns:
+        df["product_name"] = [f"Item {i+1}" for i in range(len(df))]
+    if "selling_price" not in df.columns:
+        df["selling_price"] = 100
+    else:
+        df["selling_price"] = pd.to_numeric(df["selling_price"], errors="coerce").fillna(100)
+    if "current_stock" not in df.columns:
+        df["current_stock"] = 0
+    if "daily_sales_rate" not in df.columns:
+        df["daily_sales_rate"] = 1
+    
+    return df
+
+# ============================================
+# CORE METRICS CALCULATION (FIXED - Per Row Thresholds)
+# ============================================
+def calculate_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate all inventory metrics - WITH PER-ROW CATEGORY THRESHOLDS"""
+    
+    df["current_stock"] = pd.to_numeric(df["current_stock"], errors="coerce").fillna(0)
+    df["daily_sales_rate"] = pd.to_numeric(df["daily_sales_rate"], errors="coerce").fillna(0)
+    df["days_to_expiry"] = pd.to_numeric(df["days_to_expiry"], errors="coerce").fillna(0)
+    df["selling_price"] = pd.to_numeric(df["selling_price"], errors="coerce").fillna(100)
+    
+    df["is_expired"] = df["days_to_expiry"] < 0
+    
+    # Calculate stock days (respect expiry wall)
+    stock_by_sales = np.where(df["daily_sales_rate"] > 0, df["current_stock"] / df["daily_sales_rate"], 999)
+    df["stock_days"] = np.where(
+        (df["days_to_expiry"] > 0) & (~df["is_expired"]),
+        np.minimum(stock_by_sales, df["days_to_expiry"]),
+        0
+    )
+    
+    # Calculate waste (units that will rot)
+    df["max_sellable"] = df["daily_sales_rate"] * np.maximum(0, df["days_to_expiry"])
+    df["sellable_units"] = np.minimum(df["current_stock"], df["max_sellable"])
+    df["waste_units"] = np.maximum(0, df["current_stock"] - df["sellable_units"])
+    df.loc[df["is_expired"], "waste_units"] = df.loc[df["is_expired"], "current_stock"]
+    
+    # Financial metrics
+    df["inventory_value"] = df["current_stock"] * df["selling_price"]
+    df["projected_waste"] = df["waste_units"] * df["selling_price"]
+    
+    # Risk level (deterministic hierarchy)
+    df["risk_level"] = "LOW"
+    df["risk_color"] = "#10b981"
+    df["risk_reason"] = "Healthy"
+    
+    # Priority 1: Expired
+    mask_expired = df["is_expired"]
+    df.loc[mask_expired, "risk_level"] = "CRITICAL"
+    df.loc[mask_expired, "risk_color"] = "#dc2626"
+    df.loc[mask_expired, "risk_reason"] = "Expired - Remove from shelf"
+    
+    # Priority 2: Waste exists
+    mask_waste = (~mask_expired) & (df["waste_units"] > 0)
+    df.loc[mask_waste, "risk_level"] = "CRITICAL"
+    df.loc[mask_waste, "risk_color"] = "#dc2626"
+    df.loc[mask_waste, "risk_reason"] = df.loc[mask_waste, "waste_units"].astype(int).astype(str) + " units will rot"
+    
+    # Priority 3: Stock critically low (hardcoded 3 days)
+    mask_critical = (~mask_expired) & (~mask_waste) & (df["stock_days"] <= 3) & (df["stock_days"] > 0)
+    df.loc[mask_critical, "risk_level"] = "HIGH"
+    df.loc[mask_critical, "risk_color"] = "#f59e0b"
+    df.loc[mask_critical, "risk_reason"] = "Stock critically low (" + df.loc[mask_critical, "stock_days"].astype(int).astype(str) + " days left)"
+    
+    # Priority 4: Low stock (using stock_warning_days from sidebar)
+    mask_low = (~mask_expired) & (~mask_waste) & (~mask_critical) & (df["stock_days"] <= stock_warning_days) & (df["stock_days"] > 0)
+    df.loc[mask_low, "risk_level"] = "MEDIUM"
+    df.loc[mask_low, "risk_color"] = "#eab308"
+    df.loc[mask_low, "risk_reason"] = "Low stock - reorder soon"
+    
+    # Priority 5: Expiring soon (PER ROW category thresholds - FIXED)
+    def get_expiring_risk(row):
+        if row["is_expired"] or row["waste_units"] > 0 or row["stock_days"] <= stock_warning_days:
+            return False
+        t = get_thresholds(row["category"])
+        return row["days_to_expiry"] <= t["red"] and row["days_to_expiry"] > 0
+    
+    mask_expiring = df.apply(get_expiring_risk, axis=1)
+    df.loc[mask_expiring, "risk_level"] = "MEDIUM"
+    df.loc[mask_expiring, "risk_color"] = "#eab308"
+    df.loc[mask_expiring, "risk_reason"] = "Expiring in " + df.loc[mask_expiring, "days_to_expiry"].astype(int).astype(str) + " days"
+    
+    # Traffic light based on risk
+    traffic_map = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}
+    df["traffic_light"] = df["risk_level"].map(traffic_map).fillna("🟢")
+    df["traffic_status"] = df["risk_level"] + " - " + df["risk_reason"]
+    
+    # Stock action (using stock_warning_days)
+    df["stock_action"] = "✅ ADEQUATE"
+    df["order_required"] = False
+    
+    df.loc[df["is_expired"], "stock_action"] = "❌ EXPIRED - Remove"
+    df.loc[mask_waste, "stock_action"] = "⛔ DO NOT ORDER - Stock will rot"
+    df.loc[mask_critical, "stock_action"] = "🛒 ORDER NOW - " + df.loc[mask_critical, "stock_days"].astype(int).astype(str) + " days left"
+    df.loc[mask_critical, "order_required"] = True
+    df.loc[mask_low, "stock_action"] = "📦 ORDER SOON - " + df.loc[mask_low, "stock_days"].astype(int).astype(str) + " days left"
+    df.loc[mask_low, "order_required"] = True
+    
+    # Discount calculation
+    df["discount_percent"] = 0
+    df.loc[df["is_expired"], "discount_percent"] = 100
+    df.loc[(df["days_to_expiry"] <= 7) & (df["days_to_expiry"] > 0), "discount_percent"] = 50
+    df.loc[(df["days_to_expiry"] <= 4) & (df["days_to_expiry"] > 0), "discount_percent"] = 65
+    df.loc[(df["days_to_expiry"] <= 2) & (df["days_to_expiry"] > 0), "discount_percent"] = 75
+    
+    # Recovery value
+    df["recovery_value"] = df["sellable_units"] * df["selling_price"] * (1 - df["discount_percent"] / 100)
+    df.loc[df["is_expired"], "recovery_value"] = 0
+    
+    # Priority flag
+    df["show_in_priority"] = df["risk_level"].isin(["CRITICAL", "HIGH"])
+    
+    return df
+
+# ============================================
+# AI ANALYSIS
+# ============================================
+def get_ai_analysis(summary: Dict) -> str:
+    if not GEMINI_API_KEY or not client:
+        return "⚠️ AI analysis unavailable: Missing API key"
+    
+    prompt = f"""
+You are Dishii AI, an operational intelligence system for food businesses.
+
+Analyze this inventory data and provide a concise operational briefing:
+
+**Current Status:**
+- Total Products: {summary['total']}
+- CRITICAL (🔴): {summary['red']} - Immediate action required
+- HIGH (🟠): {summary['amber']} - Address this week
+- Orders Needed: {summary['orders']}
+- Inventory Value: KES {summary.get('total_value', 0):,.0f}
+- Waste Risk: KES {summary.get('projected_waste', 0):,.0f}
+- Recovery Potential: KES {summary.get('recovery_value', 0):,.0f}
+- Operational Health: {summary.get('health_score', 0)}%
+
+**Provide a 4-section briefing:**
+
+1. 🚨 IMMEDIATE ACTIONS (top 3 things to do today)
+2. 💰 FINANCIAL RISK (estimated loss if no action)
+3. 🛒 PROCUREMENT (what to order and from whom)
+4. 📅 WEEKLY OUTLOOK (what to watch this week)
+
+Keep it practical and under 200 words. Focus on actionable recommendations.
+"""
+    try:
+        response = client.models.generate_content(model="models/gemini-2.0-flash", contents=prompt)
+        return response.text
+    except Exception as e:
+        logger.error(f"AI analysis failed: {e}")
+        return f"⚠️ AI analysis unavailable: {str(e)[:100]}"
+
+# ============================================
+# SUPABASE STORAGE
+# ============================================
+def save_to_supabase(df: pd.DataFrame, business_id: str, business_name: str, filename: str, summary: Dict) -> bool:
+    try:
+        upload_data = {
+            "business_id": business_id,
+            "business_name": business_name,
+            "file_name": filename,
+            "uploaded_at": datetime.now().isoformat(),
+            "total_items": summary["total"],
+            "red_count": summary["red"],
+            "amber_count": summary["amber"],
+            "green_count": summary["green"],
+            "orders_required": summary["orders"]
+        }
+        result = supabase.table("inventory_uploads").insert(upload_data).execute()
+        upload_id = result.data[0]["id"]
+        
+        items_to_insert = []
+        for _, row in df.iterrows():
+            items_to_insert.append({
+                "upload_id": upload_id,
+                "business_id": business_id,
+                "product_name": str(row.get("product_name", "Unknown"))[:255],
+                "expiry_date": str(row.get("expiry_date", "")) if not pd.isna(row.get("expiry_date", "")) else None,
+                "days_to_expiry": int(row["days_to_expiry"]) if pd.notna(row.get("days_to_expiry")) else None,
+                "current_stock": float(row["current_stock"]),
+                "daily_sales_rate": float(row["daily_sales_rate"]),
+                "supplier": str(row.get("supplier", ""))[:255],
+                "supplier_phone": str(row.get("supplier_phone", ""))[:50],
+                "supplier_email": str(row.get("supplier_email", ""))[:255],
+                "selling_price": float(row["selling_price"]),
+                "category": row.get("category", ""),
+                "traffic_light": row.get("traffic_light", ""),
+                "traffic_status": row.get("traffic_status", ""),
+                "order_required": bool(row.get("order_required", False)),
+                "stock_days": float(row.get("stock_days", 0)),
+                "discount_percent": int(row.get("discount_percent", 0)),
+                "inventory_value": float(row.get("inventory_value", 0)),
+                "recovery_value": float(row.get("recovery_value", 0)),
+                "projected_waste_value": float(row.get("projected_waste", 0)),
+                "risk_level": row.get("risk_level", ""),
+                "risk_reason": row.get("risk_reason", "")[:500],
+                "risk_color": row.get("risk_color", ""),
+                "show_in_priority": bool(row.get("show_in_priority", False))
+            })
+        
+        if items_to_insert:
+            chunk_size = 100
+            for i in range(0, len(items_to_insert), chunk_size):
+                chunk = items_to_insert[i:i+chunk_size]
+                supabase.table("inventory_items").insert(chunk).execute()
+        return True
+    except Exception as e:
+        st.warning(f"Database save issue: {str(e)[:100]}")
+        return False
+
+# ============================================
+# FILE HASH FOR DEDUPLICATION
+# ============================================
+def get_file_hash(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+def is_upload_processed(file_hash: str) -> bool:
+    try:
+        result = supabase.table("processed_uploads").select("id").eq("file_hash", file_hash).execute()
+        return len(result.data) > 0
+    except:
+        return False
+
+def mark_upload_processed(file_hash: str, business_id: str):
+    try:
+        supabase.table("processed_uploads").insert({
+            "file_hash": file_hash,
+            "business_id": business_id,
+            "processed_at": datetime.now().isoformat()
+        }).execute()
+    except:
+        pass
+
+# ============================================
+# PROCESS INVENTORY PIPELINE
+# ============================================
+def process_inventory_file(df: pd.DataFrame, business_id: str, business_name: str, 
+                           filename: str, manager_phone: str = None, file_hash: str = None) -> Tuple[pd.DataFrame, Dict]:
+    
+    df = normalize_columns(df)
+    df["category"] = df["product_name"].apply(detect_category)
+    df["expiry_date"] = df.apply(lambda row: correct_expiry_date(row["expiry_date"], row["category"]), axis=1)
+    df["expiry_date"] = pd.to_datetime(df["expiry_date"], errors="coerce")
+    df["days_to_expiry"] = df["expiry_date"].apply(days_to_expiry)
+    df = calculate_metrics(df)
+    
+    total_waste_ratio = df["projected_waste"].sum() / df["inventory_value"].sum() if df["inventory_value"].sum() > 0 else 0
+    health_score = max(0, min(100, 100 - (total_waste_ratio * 100)))
+    
+    summary = {
+        "total": len(df),
+        "red": len(df[df["traffic_light"] == "🔴"]),
+        "amber": len(df[df["traffic_light"] == "🟠"]),
+        "green": len(df[df["traffic_light"] == "🟢"]),
+        "orders": len(df[df["order_required"] == True]),
+        "total_value": df["inventory_value"].sum(),
+        "projected_waste": df["projected_waste"].sum(),
+        "recovery_value": df["recovery_value"].sum(),
+        "health_score": int(health_score)
+    }
+    
+    # Send WhatsApp alerts with deduplication
+    alerts_sent = send_whatsapp_alerts(df, manager_phone, business_name, file_hash) if manager_phone else 0
+    summary["alerts_sent"] = alerts_sent
+    
+    save_to_supabase(df, business_id, business_name, filename, summary)
+    
+    return df, summary
+
+# ============================================
+# DISPLAY FUNCTIONS
+# ============================================
+def metric_card(title: str, value, subtitle: str = ""):
+    return f'<div class="metric-card"><div class="metric-title">{title}</div><div class="metric-value">{value}</div><div class="metric-subtitle">{subtitle}</div></div>'
+
+def display_dashboard(df: pd.DataFrame, summary: Dict, items_per_page: int, show_top_products: int):
+    # Define these ONCE at the top to avoid NameError in Tab 4
+    orders_df = df[df["order_required"] == True]
+    expired_df = df[df["is_expired"] == True]
+    
+    st.markdown(f"""
+    <div class="hero-section">
+        <div class="hero-title">Dishii Intelligence</div>
+        <div class="hero-subtitle">Real-time inventory risk detection, waste prevention, and procurement automation for food businesses.</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("#### 📈 Operational Health")
+    st.progress(summary["health_score"] / 100)
+    c1, c2, c3 = st.columns(3)
+    with c1: st.metric("Health Score", f"{summary['health_score']}%")
+    with c2: st.metric("Total Value", f"KES {summary['total_value']:,.0f}")
+    with c3: st.metric("Waste Risk", f"KES {summary['projected_waste']:,.0f}")
+    
+    st.markdown("---")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1: st.markdown(metric_card("🔴 CRITICAL", summary["red"], "Immediate action required"), unsafe_allow_html=True)
+    with col2: st.markdown(metric_card("🟠 HIGH", summary["amber"], "Address this week"), unsafe_allow_html=True)
+    with col3: st.markdown(metric_card("🟢 LOW", summary["green"], "Healthy inventory"), unsafe_allow_html=True)
+    with col4: st.markdown(metric_card("🛒 ORDERS NEEDED", summary["orders"], "Place now"), unsafe_allow_html=True)
+    
+    if summary.get("alerts_sent", 0) > 0:
+        st.success(f"✅ {summary['alerts_sent']} WhatsApp alerts sent to manager")
+    
+    st.markdown("---")
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview", "🎯 Priority Actions", "🛒 Procurement", "📋 Full Inventory"])
+    
+    with tab1:
+        with st.spinner("🤖 Generating AI operations briefing..."):
+            ai_briefing = get_ai_analysis(summary)
+        st.markdown("#### 🤖 AI Operations Briefing")
+        st.info(ai_briefing)
+        
+        col_chart1, col_chart2 = st.columns(2)
+        
+        with col_chart1:
+            st.markdown("#### Risk Distribution")
+            risk_data = []
+            if summary['red'] > 0:
+                risk_data.append({'Risk': 'CRITICAL', 'Count': summary['red']})
+            if summary['amber'] > 0:
+                risk_data.append({'Risk': 'HIGH', 'Count': summary['amber']})
+            if summary['green'] > 0:
+                risk_data.append({'Risk': 'LOW', 'Count': summary['green']})
+            
+            if risk_data:
+                fig = px.pie(pd.DataFrame(risk_data), names='Risk', values='Count', hole=0.4,
+                           color='Risk', color_discrete_map={'CRITICAL': '#dc2626', 'HIGH': '#f59e0b', 'LOW': '#10b981'})
+                fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="white"))
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col_chart2:
+            st.markdown("#### Stock Status")
+            stock_data = [('Order Required', summary['orders']), ('Stock OK', summary['total'] - summary['orders'])]
+            fig = px.bar(pd.DataFrame(stock_data, columns=['Action', 'Count']), x='Action', y='Count', color='Action', text='Count',
+                        color_discrete_map={'Order Required': '#dc2626', 'Stock OK': '#10b981'})
+            fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="white"), showlegend=False)
+            fig.update_traces(textposition="outside")
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with tab2:
+        priority_df = df[df["show_in_priority"] == True].head(show_top_products)
+        if len(priority_df) > 0:
+            st.markdown(f"#### 🎯 Priority Actions ({len(priority_df)} items needing attention)")
+            for _, row in priority_df.iterrows():
+                color = row.get("risk_color", "#dc2626")
+                st.markdown(f"""
+                <div class="action-card" style="border-left-color: {color};">
+                    <div class="action-title">📦 {row['product_name']}</div>
+                    <div class="action-reason">⚠️ {row['risk_reason']}</div>
+                    <div class="action-supplier">
+                        Supplier: {row.get('supplier', 'Unknown')} | 
+                        Discount: {row['discount_percent']}% | 
+                        Action: {row['stock_action']}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.success("✅ No priority actions! All inventory is healthy.")
+        
+        if not expired_df.empty:
+            st.markdown(f"#### ⚠️ Expired Products ({len(expired_df)} items)")
+            for _, row in expired_df.head(items_per_page).iterrows():
+                st.markdown(f"""
+                <div class="action-card" style="border-left-color: #dc2626;">
+                    <div class="action-title">📦 {row['product_name']}</div>
+                    <div class="action-reason">❌ EXPIRED - Remove from shelf immediately</div>
+                    <div class="action-supplier">Supplier: {row.get('supplier', 'Unknown')}</div>
+                </div>
+                """, unsafe_allow_html=True)
+    
+    with tab3:
+        if len(orders_df) > 0:
+            st.markdown(f"#### 🛒 Procurement Recommendations ({len(orders_df)} items to order)")
+            
+            for supplier in orders_df["supplier"].dropna().unique():
+                supplier_df = orders_df[orders_df["supplier"] == supplier]
+                with st.expander(f"📞 {supplier} - {len(supplier_df)} items to order"):
+                    for _, row in supplier_df.iterrows():
+                        suggested_qty = int(row['daily_sales_rate'] * 14)
+                        urgency = "🔥 URGENT" if row["risk_level"] == "CRITICAL" else "📦 Standard"
+                        st.write(f"• **{row['product_name']}** - Order {suggested_qty} units (Stock: {row['current_stock']:.0f}) - {urgency}")
+        else:
+            st.success("✅ No procurement needed. All stock levels are healthy!")
+    
+    with tab4:
+        st.markdown("#### 📋 Complete Inventory")
+        
+        display_cols = [
+            "product_name", "category", "traffic_light", "traffic_status",
+            "days_to_expiry", "current_stock", "stock_days", "risk_level",
+            "discount_percent", "inventory_value", "supplier"
+        ]
+        display_cols = [c for c in display_cols if c in df.columns]
+        
+        st.dataframe(
+            df[display_cols].head(items_per_page),
+            use_container_width=True,
+            height=400,
+            column_config={
+                "inventory_value": st.column_config.NumberColumn("Value (KES)", format="KES %.0f"),
+                "discount_percent": st.column_config.NumberColumn("Discount %", format="%.0f%%"),
+                "stock_days": st.column_config.NumberColumn("Stock Days", format="%.1f")
+            }
+        )
+        
+        if len(df) > items_per_page:
+            st.caption(f"Showing {items_per_page} of {len(df)} products. Adjust 'Items per page' in sidebar to see more.")
+        
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="Full Inventory", index=False)
+            if len(orders_df) > 0:
+                orders_df.to_excel(writer, sheet_name="Orders Required", index=False)
+            if len(expired_df) > 0:
+                expired_df.to_excel(writer, sheet_name="Expired Products", index=False)
+        
+        st.download_button(
+            label="📥 Download Full Report (Excel)",
+            data=output.getvalue(),
+            file_name=f"dishii_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+# ============================================
+# MAIN APPLICATION
+# ============================================
+if uploaded_file:
+    if not business_name:
+        st.error("❌ Please enter your business name in the sidebar")
+    else:
+        with st.spinner("🔄 Processing inventory file..."):
+            try:
+                file_bytes = uploaded_file.getvalue()
+                file_hash = get_file_hash(file_bytes)
+                uploaded_file.seek(0)
+                
+                df = pd.read_excel(uploaded_file) if not uploaded_file.name.endswith(".csv") else pd.read_csv(uploaded_file)
+                
+                business_id, is_new = get_or_create_business(business_name, manager_phone)
+                st.session_state.current_business_id = business_id
+                
+                if is_new:
+                    st.success(f"✅ New business registered: {business_name}")
+                else:
+                    st.info(f"👋 Welcome back {business_name}")
+                
+                processed_df, summary = process_inventory_file(
+                    df, business_id, business_name, uploaded_file.name, manager_phone, file_hash
+                )
+                
+                st.session_state.current_df = processed_df
+                st.session_state.current_summary = summary
+                st.session_state.upload_count += 1
+                
+                display_dashboard(processed_df, summary, items_per_page, show_top_products)
+                
+                if summary.get("alerts_sent", 0) > 0:
+                    st.toast(f"📱 {summary['alerts_sent']} WhatsApp alerts sent to manager", icon="✅")
+                
+            except Exception as e:
+                logger.error(f"Processing error: {e}")
+                st.error(f"❌ Error processing file: {str(e)}")
+else:
+    if logo_base64:
+        st.markdown(f"""
+        <div style="text-align: center; padding: 2rem;">
+            <img src="data:image/png;base64,{logo_base64}" width="80" style="border-radius: 16px; margin-bottom: 1rem;">
+            <h2>Welcome to Dishii</h2>
+            <p style="color: #94a3b8;">Upload your inventory Excel or CSV file to get started</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="text-align: center; padding: 2rem;">
+            <h2>🍔 Welcome to Dishii</h2>
+            <p style="color: #94a3b8;">Upload your inventory Excel or CSV file to get started</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("""
+        <div class="metric-card">
+            <div class="metric-title">🚦 Expiry Intelligence</div>
+            <div class="metric-value">Smart Detection</div>
+            <div class="metric-subtitle">Category-specific thresholds: Fresh produce (3-7 days), Meat (2-4 days), Dairy (5-14 days)</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown("""
+        <div class="metric-card">
+            <div class="metric-title">📦 Stock Intelligence</div>
+            <div class="metric-value">Auto Alerts</div>
+            <div class="metric-subtitle">Real-time stockout predictions and reorder recommendations</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        st.markdown("""
+        <div class="metric-card">
+            <div class="metric-title">💰 Financial Intelligence</div>
+            <div class="metric-value">Waste Recovery</div>
+            <div class="metric-subtitle">Projected waste value and optimal markdown suggestions</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("---")
+    st.markdown("### 📋 Sample Excel Format")
+    sample_df = pd.DataFrame({
+        "product_name": ["Tomatoes (loose)", "Milk 500ml", "Chicken Breast (fresh)", "Rice 2kg"],
+        "expiry_date": ["2026-06-01", "2026-05-20", "2026-05-18", "2026-12-31"],
+        "current_stock": [50, 200, 30, 500],
+        "daily_sales_rate": [12, 20, 8, 10],
+        "supplier": ["Fresh Farms", "DairyCo", "Kenchic", "Rice Millers"],
+        "selling_price": [120, 65, 350, 180]
+    })
+    st.dataframe(sample_df, use_container_width=True)
+    st.caption("💡 Column names are flexible. The system auto-detects variations like 'Product Name', 'Stock', 'Price', etc.")
+
+# ============================================
+# FOOTER
+# ============================================
+st.divider()
+st.markdown("""
+<div style="text-align: center; padding: 1rem;">
+    <p style="color: #64748b; font-size: 0.75rem;">
+        🍔 <strong>Dishii</strong> — Food Operations Intelligence Platform<br>
+        AI-powered inventory management | Waste reduction | Procurement automation | Real-time alerts
+    </p>
+</div>
+""", unsafe_allow_html=True)

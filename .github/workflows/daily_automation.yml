@@ -1,17 +1,17 @@
-name: Dishii Daily Automation
+name: Dishii AI Agent
 
 on:
   schedule:
-    # Runs every day at 6:00 PM EAT (15:00 UTC)
     - cron: '0 15 * * *'
-  workflow_dispatch:  # Allows manual trigger from GitHub
+  workflow_dispatch:
 
 jobs:
-  automate:
+  run-agent:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
     
     - name: Setup Python
       uses: actions/setup-python@v5
@@ -22,12 +22,9 @@ jobs:
       run: |
         pip install supabase pandas python-dotenv
     
-    - name: Run daily automation
+    - name: Run Dishii AI Agent
       env:
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
-        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        REPORT_EMAIL: ${{ secrets.REPORT_EMAIL }}
       run: |
-        python automation.py
+        python agent_automation.py
