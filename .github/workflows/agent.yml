@@ -2,8 +2,8 @@ name: Dishii Autonomous Agent
 
 on:
   schedule:
-    - cron: '0,30 * * * *'   # Every 30 minutes
-  workflow_dispatch:          # Manual trigger from GitHub Actions tab
+    - cron: '0,30 * * * *'
+  workflow_dispatch:
 
 jobs:
   run-agent:
@@ -23,23 +23,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Dishii Agent
-        env:
-          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY:        ${{ secrets.SUPABASE_KEY }}
-          EVOLUTION_URL:       ${{ secrets.EVOLUTION_URL }}
-          EVOLUTION_KEY:       ${{ secrets.EVOLUTION_KEY }}
-          EVOLUTION_INSTANCE:  ${{ secrets.EVOLUTION_INSTANCE }}
-          GCP_PROJECT_ID:      ${{ secrets.GCP_PROJECT_ID }}
-          GCP_REGION:          ${{ secrets.GCP_REGION }}
-          CLAUDE_MODEL:        ${{ secrets.CLAUDE_MODEL }}
-        run: python agent.py
-
-      - name: Report status
-        if: always()
-        run: echo "Agent run completed at $(date)"
-
-        - name: Authenticate to Google Cloud
+      - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_CREDENTIALS }}
+
+      - name: Run Dishii Agent
+        env:
+          SUPABASE_URL:       ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:       ${{ secrets.SUPABASE_KEY }}
+          EVOLUTION_URL:      ${{ secrets.EVOLUTION_URL }}
+          EVOLUTION_KEY:      ${{ secrets.EVOLUTION_KEY }}
+          EVOLUTION_INSTANCE: ${{ secrets.EVOLUTION_INSTANCE }}
+          GCP_PROJECT_ID:     ${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION:         ${{ secrets.GCP_REGION }}
+          CLAUDE_MODEL:       claude-sonnet-4-6
+        run: python agent.py
